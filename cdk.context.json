@@ -1,0 +1,11 @@
+{
+  "availability-zones:account=643093502804:region=ap-northeast-1": [
+    "ap-northeast-1a",
+    "ap-northeast-1c",
+    "ap-northeast-1d"
+  ],
+  "hosted-zone:account=643093502804:domainName=a.read-dx.com:region=ap-northeast-1": {
+    "Id": "/hostedzone/Z03094072WNPZ1WRD4Y16",
+    "Name": "a.read-dx.com."
+  }
+}

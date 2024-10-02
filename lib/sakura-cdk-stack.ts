@@ -6,6 +6,7 @@ import { SubnetType } from 'aws-cdk-lib/aws-ec2';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as route53 from 'aws-cdk-lib/aws-route53';
 
 export class SakuraCdkStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -14,6 +15,7 @@ export class SakuraCdkStack extends cdk.Stack {
     // VPC の作成
     const vpc = new ec2.Vpc(this, 'SakuraVPC', {
       maxAzs: 2,
+      natGateways: 0,
     });
 
     // セキュリティグループの作成
@@ -25,23 +27,23 @@ export class SakuraCdkStack extends cdk.Stack {
 
     sg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(22), 'Allow SSH Access');
     sg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(8090), 'Allow Pocketbase Access');
+    sg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(443), 'Allow HTTPS Access');
+    sg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(80), 'Allow HTTPS Access');
 
 
-    // キーペア作成
-    const cfnKeyPair = new ec2.CfnKeyPair(this, 'CfnKeyPair', {
-      keyName: 'sakura-key',
-    })
 
-    cfnKeyPair.applyRemovalPolicy(RemovalPolicy.DESTROY)
+
+    // コンソール画面から作成しているEC2のキーペアを取得
+    const keyPair = ec2.KeyPair.fromKeyPairName(this, 'KeyPair', 'sakura-backend-key');
 
     // キーペア取得コマンドアウトプット
     new CfnOutput(this, 'GetSSHKeyCommand', {
-      value: `aws ssm get-parameter --name /ec2/keypair/${cfnKeyPair.getAtt('KeyPairId')} --region ${this.region} --with-decryption --query Parameter.Value --output text`,
+      value: `aws ssm get-parameter --name /ec2/keypair/${keyPair.keyPairName} --region ${this.region} --with-decryption --query Parameter.Value --output text`,
     })
 
-    // S3バケットを作成
+    // S3バケットを作成　(バックアップ用)
     const sakuraBucket = new s3.Bucket(this, 'pbBackupBucket', {
-      bucketName: 'pbbackup-sakura-bucket',
+      bucketName: 'pb-backup-sakura-bucket',
       versioned: true,
       encryption: s3.BucketEncryption.S3_MANAGED,
       autoDeleteObjects: true,
@@ -62,7 +64,7 @@ export class SakuraCdkStack extends cdk.Stack {
       }),
       vpc: vpc,
       securityGroup: sg,
-      keyPair: ec2.KeyPair.fromKeyPairName(this, 'KeyPair', 'sakura-key'),
+      keyPair: keyPair,
       vpcSubnets: { subnetType: SubnetType.PUBLIC }, // パブリックサブネットを指定
 
     });
@@ -83,6 +85,7 @@ export class SakuraCdkStack extends cdk.Stack {
     // Elastic IPの作成
     const eip = new ec2.CfnEIP(this, 'SakuraElasticIP', {
       domain: 'vpc',
+
     });
 
     // Elastic IPをEC2インスタンスに関連付け
@@ -93,29 +96,16 @@ export class SakuraCdkStack extends cdk.Stack {
     // Elastic IPを削除しないように設定
     eip.applyRemovalPolicy(RemovalPolicy.RETAIN);
 
+    // 既存のホストゾーンを参照
+    const hostedZone = route53.HostedZone.fromLookup(this, 'ExistingHostedZone', {
+      domainName: 'a.read-dx.com',
+    });
 
-    // User Data を使用して Pocketbase をインストールおよび起動
-    sakuraEc2.userData.addCommands(
-      'yum update -y',
-      'yum install -y wget unzip',
-      'wget https://github.com/pocketbase/pocketbase/releases/download/v0.22.21/pocketbase_0.22.21_linux_amd64.zip',
-      'unzip pocketbase_0.22.21_linux_amd64.zip -d /home/ec2-user/pocketbase',
-      'chmod +x /home/ec2-user/pocketbase/pocketbase',
-      'nohup /home/ec2-user/pocketbase/pocketbase serve --http 0.0.0.0:8090 &',
-
-      // AWS CLIのインストール
-      'yum install -y awscli',
-
-      // バックアップスクリプトの作成
-      'echo "#!/bin/bash" > /home/ec2-user/backup_pocketbase.sh',
-      'echo "tar -czf /home/ec2-user/pocketbase_backup_$(date +%F).tar.gz /home/ec2-user/pocketbase/pb_data" >> /home/ec2-user/backup_pocketbase.sh',
-      'echo "aws s3 cp /home/ec2-user/pocketbase_backup_$(date +%F).tar.gz s3://PocketbaseBackupBucketName/" >> /home/ec2-user/backup_pocketbase.sh',
-      'chmod +x /home/ec2-user/backup_pocketbase.sh',
-
-      // cronジョブの設定（毎日深夜2時に実行）
-      'echo "0 2 * * * /home/ec2-user/backup_pocketbase.sh >> /var/log/backup.log 2>&1" >> /etc/crontab',
-      'service crond restart'
-    );
+    new route53.ARecord(this, 'AliasRecord', {
+      zone: hostedZone,
+      recordName: 'sakura',
+      target: route53.RecordTarget.fromIpAddresses('18.182.126.160'), // 対象のIPアドレスに変更
+    });
 
     // パブリック出力情報
     new cdk.CfnOutput(this, 'EC2 Public IP', {
